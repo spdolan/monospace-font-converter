@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monospace-font-converter"
+version = "0.1.0"
+description = "Turn a proportional font you are licensed to modify into a fixed-pitch derivative for terminal use"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "Sean Dolan" }]
+keywords = ["font", "monospace", "terminal", "fonttools"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Text Processing :: Fonts",
+  "Environment :: Console",
+]
+dependencies = ["fonttools>=4.40"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+monospace-font-converter = "monospace_font_converter.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/spdolan/monospace-font-converter"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+# Never commit font files: derivatives of licensed fonts must stay local.
+*.ttf
+*.otf
+*.ttc
+*.woff
+*.woff2
