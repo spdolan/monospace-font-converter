@@ -26,7 +26,7 @@ Converted fonts usually lack box-drawing and powerline glyphs. Most terminals le
 
 ## Install
 
-Requires Python 3.9 or later.
+Requires Python 3.10 or later.
 
 ```sh
 pipx install git+https://github.com/spdolan/monospace-font-converter
