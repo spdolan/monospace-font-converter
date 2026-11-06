@@ -69,6 +69,23 @@ Options for `convert`:
 | `--family NAME` | Family name for the derivative. Default: `<original family> Mono`. |
 | `--keep-layout` | Keep kerning and OpenType layout tables. |
 
+### Borrowing narrow glyphs from a monospaced font
+
+The letters that suffer most in a mechanical conversion are the ones that are a bare stem in a proportional sans: `i`, `l`, `1` and friends. Monospaced designs give them serifs or tails so they fill their cell. If you have a monospaced font you are also licensed to modify, the converter can borrow those glyphs from it, scaled to the converted font's x-height and cap height and slanted to match its italic angle:
+
+```sh
+monospace-font-converter convert /path/to/Family.ttf -o out \
+    --donor /path/to/MonoDonor-Medium.ttf --donor-glyphs "ijlrftI1"
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--donor FONT` | Monospaced font file to borrow glyphs from. |
+| `--donor-face N` | Face index within a donor collection. Default: 0. |
+| `--donor-glyphs CHARS` | Characters to take from the donor. Default: `ijlrftI1`. |
+
+Pick a donor with a similar feel and weight. Geometric sans donors suit geometric sans sources. Because the donor is scaled down when its x-height is taller than the source's, a donor one weight heavier than the source often matches best. The output is then a derivative of both fonts, and both licenses apply.
+
 Install the generated files the way you would any font, for example by copying them into `~/Library/Fonts` on macOS or `~/.local/share/fonts` on Linux, then select the new family in your terminal's settings.
 
 ## Licensing and intended use
@@ -84,6 +101,8 @@ Please read this section before using the tool.
 - Most commercial font licenses, and the licenses covering fonts bundled with operating systems such as macOS and Windows, do **not** permit creating modified versions, or permit it only for your own use on licensed machines. Many prohibit redistribution of any derivative outright. The fact that a font is installed on your computer does not mean you may modify it.
 
 **Keep derivatives of restricted fonts to yourself.** If a license allows personal modification but not redistribution, treat the output as private: install it on your own machines only, and do not commit it to a repository, attach it to a bug report, bundle it with an application or share it with colleagues. The repository's `.gitignore` excludes font files for this reason.
+
+**Donor fonts count too.** When you borrow glyphs with `--donor`, the output is a derivative of the donor as well, and the donor's license must also permit modification. Fonts under the SIL Open Font License are the usual choice.
 
 **Do not pass derivatives off as the original.** The tool renames every output by default. Keep that behaviour, and avoid names that suggest the output is an official release of the original typeface or an official product of its foundry. Typeface names are often trademarks.
 

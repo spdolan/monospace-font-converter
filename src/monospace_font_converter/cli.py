@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from . import __version__
-from .convert import Options, convert_file, list_faces
+from .convert import DEFAULT_DONOR_GLYPHS, Options, convert_file, list_faces
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +34,15 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--wide", choices=("squeeze", "overflow"), default="squeeze", help="what to do with glyphs wider than the cell (default: squeeze)")
     cv.add_argument("--family", help="family name for the derivative (default: '<original family> Mono')")
     cv.add_argument("--keep-layout", action="store_true", help="keep kerning and OpenType layout tables (dropped by default)")
+    donor = cv.add_argument_group(
+        "donor glyphs",
+        "Borrow a few glyphs from a monospaced font you are also licensed to modify, scaled to the "
+        "converted font's x-height and cap height and slanted to its italic angle. Use it for "
+        "narrow letters that otherwise float in their cell.",
+    )
+    donor.add_argument("--donor", metavar="FONT", help="monospaced font file to borrow glyphs from")
+    donor.add_argument("--donor-face", type=int, default=0, help="face index within the donor collection (default: 0)")
+    donor.add_argument("--donor-glyphs", default=DEFAULT_DONOR_GLYPHS, metavar="CHARS", help=f"characters to take from the donor (default: {DEFAULT_DONOR_GLYPHS})")
     return p
 
 
@@ -52,6 +61,9 @@ def main(argv=None) -> int:
         wide=args.wide,
         family=args.family,
         strip_layout=not args.keep_layout,
+        donor=args.donor,
+        donor_face=args.donor_face,
+        donor_glyphs=args.donor_glyphs,
     )
     try:
         results = convert_file(args.font, args.out_dir, options, faces=args.face)
@@ -62,6 +74,8 @@ def main(argv=None) -> int:
         line = f"{r.postscript_name}: cell {r.cell}, {r.glyph_count} glyphs, {r.squeezed} squeezed"
         if r.overflowed:
             line += f", {r.overflowed} overflowing"
+        if r.donated:
+            line += f", {r.donated} from donor"
         print(f"{line} -> {r.path}")
         for note in r.notes:
             print(f"  note: {note}")

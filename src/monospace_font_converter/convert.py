@@ -12,17 +12,25 @@ CFF2 are not supported.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
+from fontTools.misc.transform import Transform
+from fontTools.pens.cu2quPen import Cu2QuPen
 from fontTools.pens.recordingPen import DecomposingRecordingPen
+from fontTools.pens.reverseContourPen import ReverseContourPen
 from fontTools.pens.t2CharStringPen import T2CharStringPen
 from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTCollection, TTFont
 
 WIDE_MODES = ("squeeze", "overflow")
+
+# Characters that are usually a bare stem in a proportional sans and so look lost
+# in a fixed cell. Real monospaced designs give them serifs or tails.
+DEFAULT_DONOR_GLYPHS = "ijlrftI1"
 
 # Tables that only make sense for the original proportional outlines.
 HINTING_TABLES = ("fpgm", "prep", "cvt ", "hdmx", "LTSH", "DSIG")
@@ -42,6 +50,9 @@ class Options:
     wide: str = "squeeze"
     family: Optional[str] = None
     strip_layout: bool = True
+    donor: Optional[str] = None
+    donor_face: int = 0
+    donor_glyphs: str = DEFAULT_DONOR_GLYPHS
 
     def __post_init__(self) -> None:
         if self.wide not in WIDE_MODES:
@@ -61,6 +72,7 @@ class ConversionResult:
     glyph_count: int
     squeezed: int = 0
     overflowed: int = 0
+    donated: int = 0
     path: Optional[str] = None
     notes: List[str] = field(default_factory=list)
 
@@ -113,16 +125,78 @@ def _check_supported(font: TTFont) -> None:
         raise ValueError("font has neither TrueType nor CFF outlines")
 
 
-def _ink_bounds(rec: DecomposingRecordingPen):
-    """x-extent of a recorded outline (control points; good enough for cell fitting)."""
-    xs = []
+def _points(rec: DecomposingRecordingPen):
     for op, args in rec.value:
         for pt in args:
             if isinstance(pt, tuple) and len(pt) == 2 and isinstance(pt[0], (int, float)):
-                xs.append(pt[0])
+                yield pt
+
+
+def _ink_bounds(rec: DecomposingRecordingPen, transform: Optional[Transform] = None):
+    """x-extent of a recorded outline (control points; good enough for cell fitting),
+    optionally after applying ``transform``."""
+    xs = [(transform.transformPoint(p)[0] if transform else p[0]) for p in _points(rec)]
     if not xs:
         return None
     return min(xs), max(xs)
+
+
+def _measure(font: TTFont, attr: str, sample: str) -> Optional[float]:
+    """x-height or cap height from OS/2, falling back to the bounds of a sample glyph."""
+    value = getattr(font["OS/2"], attr, 0) or 0
+    if value > 0:
+        return float(value)
+    cmap = font.getBestCmap() or {}
+    gname = cmap.get(ord(sample))
+    if not gname:
+        return None
+    rec = DecomposingRecordingPen(font.getGlyphSet())
+    font.getGlyphSet()[gname].draw(rec)
+    ys = [p[1] for p in _points(rec)]
+    return float(max(ys)) if ys else None
+
+
+def _load_donor(path: str, face: int) -> TTFont:
+    faces = load_faces(path)
+    if face < 0 or face >= len(faces):
+        raise IndexError(f"donor face index {face} out of range (file has {len(faces)} faces)")
+    donor = faces[face]
+    _check_supported(donor)
+    return donor
+
+
+def _donor_outlines(font: TTFont, options: Options, notes: List[str]) -> Dict[str, Tuple[DecomposingRecordingPen, Transform, bool]]:
+    """Map target glyph names to (donor outline, scale/slant transform, reverse) for
+    the characters listed in ``options.donor_glyphs``. ``reverse`` is set when the
+    donor's outline format differs from the target's, since CFF and TrueType use
+    opposite contour directions."""
+    if not options.donor:
+        return {}
+    donor = _load_donor(options.donor, options.donor_face)
+    reverse = ("CFF " in donor) != ("CFF " in font)
+    t_xh, d_xh = _measure(font, "sxHeight", "x"), _measure(donor, "sxHeight", "x")
+    t_cap, d_cap = _measure(font, "sCapHeight", "H"), _measure(donor, "sCapHeight", "H")
+    upem_ratio = font["head"].unitsPerEm / donor["head"].unitsPerEm
+    lower_scale = (t_xh / d_xh) if (t_xh and d_xh) else upem_ratio
+    upper_scale = (t_cap / d_cap) if (t_cap and d_cap) else upem_ratio
+    angle = font["post"].italicAngle or 0.0
+    skew = -math.tan(math.radians(angle))  # italicAngle is negative for a rightward lean
+    t_cmap, d_cmap = font.getBestCmap() or {}, donor.getBestCmap() or {}
+    d_set = donor.getGlyphSet()
+    out = {}
+    missing = []
+    for ch in dict.fromkeys(options.donor_glyphs):
+        t_name, d_name = t_cmap.get(ord(ch)), d_cmap.get(ord(ch))
+        if not t_name or not d_name:
+            missing.append(ch)
+            continue
+        rec = DecomposingRecordingPen(d_set)
+        d_set[d_name].draw(rec)
+        scale = lower_scale if ch.islower() else upper_scale
+        out[t_name] = (rec, Transform(scale, 0, skew * scale, scale, 0, 0), reverse)
+    if missing:
+        notes.append("donor glyphs not available for: " + "".join(missing))
+    return out
 
 
 def _cff_private(font: TTFont, glyph_name: str):
@@ -148,11 +222,19 @@ def convert_font(font: TTFont, options: Options) -> ConversionResult:
     charstrings = font["CFF "].cff.topDictIndex[0].CharStrings if is_cff else None
     global_subrs = font["CFF "].cff.GlobalSubrs if is_cff else None
 
-    squeezed = overflowed = 0
+    notes: List[str] = []
+    donors = _donor_outlines(font, options, notes)
+    squeezed = overflowed = donated = 0
     for name in font.getGlyphOrder():
-        rec = DecomposingRecordingPen(glyph_set)
-        glyph_set[name].draw(rec)
-        bounds = _ink_bounds(rec)
+        reverse = False
+        if name in donors:
+            rec, base, reverse = donors[name]
+            donated += 1
+        else:
+            rec = DecomposingRecordingPen(glyph_set)
+            glyph_set[name].draw(rec)
+            base = Transform()
+        bounds = _ink_bounds(rec, base)
         sx, dx = 1.0, 0.0
         if bounds is not None:
             xmin, xmax = bounds
@@ -164,19 +246,25 @@ def convert_font(font: TTFont, options: Options) -> ConversionResult:
                 else:
                     overflowed += 1
             dx = (cell - ink_w * sx) / 2 - xmin * sx
+        # Final transform: donor scale/slant (if any), then horizontal fit, then centering.
+        t = Transform(sx, 0, 0, 1, dx, 0).transform(base)
+        pen_transform = (t.xx, t.xy, t.yx, t.yy, t.dx, t.dy)
 
         # The left side bearing must match the outline's xMin: TrueType renderers
         # shift the outline to the bearing, so a wrong value un-centers the glyph.
         lsb = 0
         if is_cff:
             pen = T2CharStringPen(cell, None)
-            rec.replay(TransformPen(pen, (sx, 0, 0, 1, dx, 0)))
+            sink = ReverseContourPen(pen) if reverse else pen
+            rec.replay(TransformPen(sink, pen_transform))
             charstrings[name] = pen.getCharString(private=_cff_private(font, name), globalSubrs=global_subrs)
             if bounds is not None:
                 lsb = int(round(bounds[0] * sx + dx))
         else:
             pen = TTGlyphPen(None)
-            rec.replay(TransformPen(pen, (sx, 0, 0, 1, dx, 0)))
+            # Cubic curves (from a CFF donor) must become quadratics for a glyf table.
+            sink = Cu2QuPen(pen, max_err=font["head"].unitsPerEm / 1000.0, reverse_direction=reverse)
+            rec.replay(TransformPen(sink, pen_transform))
             new_glyph = pen.glyph()
             glyf[name] = new_glyph
             if new_glyph.numberOfContours:
@@ -203,10 +291,9 @@ def convert_font(font: TTFont, options: Options) -> ConversionResult:
     font["hhea"].advanceWidthMax = cell
 
     family, style, ps_name = _rename(font, options.family)
-    notes = []
     if options.wide == "overflow" and overflowed:
         notes.append(f"{overflowed} glyphs are wider than the cell and will overlap neighbours")
-    return ConversionResult(ps_name, family, style, cell, len(font.getGlyphOrder()), squeezed, overflowed, None, notes)
+    return ConversionResult(ps_name, family, style, cell, len(font.getGlyphOrder()), squeezed, overflowed, donated, None, notes)
 
 
 def _rename(font: TTFont, new_family: Optional[str]):

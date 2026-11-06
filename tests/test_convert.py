@@ -26,14 +26,15 @@ def _rect(pen, x0, x1):
     pen.moveTo((x0, 0)); pen.lineTo((x1, 0)); pen.lineTo((x1, 500)); pen.lineTo((x0, 500)); pen.closePath()
 
 
-def build_font(cff: bool) -> TTFont:
+def build_font(cff: bool, glyphs=None, x_height=500, italic_angle=0.0) -> TTFont:
+    glyphs = glyphs or GLYPHS
     fb = FontBuilder(UPEM, isTTF=not cff)
-    fb.setupGlyphOrder(list(GLYPHS))
-    fb.setupCharacterMap(CMAP)
+    fb.setupGlyphOrder(list(glyphs))
+    fb.setupCharacterMap({cp: n for cp, n in CMAP.items() if n in glyphs})
     metrics = {}
     if cff:
         charstrings = {}
-        for name, (adv, x0, x1) in GLYPHS.items():
+        for name, (adv, x0, x1) in glyphs.items():
             pen = T2CharStringPen(adv, None)
             if x0 is not None:
                 _rect(pen, x0, x1)
@@ -41,19 +42,19 @@ def build_font(cff: bool) -> TTFont:
             metrics[name] = (adv, x0 or 0)
         fb.setupCFF("Test-Regular", {"FamilyName": "Test"}, charstrings, {})
     else:
-        glyphs = {}
-        for name, (adv, x0, x1) in GLYPHS.items():
+        outlines = {}
+        for name, (adv, x0, x1) in glyphs.items():
             pen = TTGlyphPen(None)
             if x0 is not None:
                 _rect(pen, x0, x1)
-            glyphs[name] = pen.glyph()
+            outlines[name] = pen.glyph()
             metrics[name] = (adv, x0 or 0)
-        fb.setupGlyf(glyphs)
+        fb.setupGlyf(outlines)
     fb.setupHorizontalMetrics(metrics)
     fb.setupHorizontalHeader(ascent=800, descent=-200)
     fb.setupNameTable({"familyName": "Test", "styleName": "Regular"})
-    fb.setupOS2()
-    fb.setupPost()
+    fb.setupOS2(sxHeight=x_height, sCapHeight=700)
+    fb.setupPost(italicAngle=italic_angle)
     return fb.font
 
 
@@ -144,3 +145,47 @@ def test_convert_file_rejects_bad_face_index(tmp_path):
     build_font(False).save(src)
     with pytest.raises(IndexError):
         convert_file(src, str(tmp_path), Options(), faces=[3])
+
+
+def test_donor_glyph_is_scaled_to_x_height_and_centered(tmp_path):
+    # Donor "i" is a 400-unit-wide bar in a font whose x-height is 600; the target's
+    # x-height is 500, so the bar should arrive 5/6 as wide: 333 units, centered in 600.
+    donor = build_font(False, glyphs={".notdef": (500, 50, 450), "i": (600, 100, 500)}, x_height=600)
+    donor_path = os.path.join(tmp_path, "Donor.ttf")
+    donor.save(donor_path)
+    font = build_font(False)
+    result = convert_font(font, Options(donor=donor_path, donor_glyphs="iq"))
+    font = roundtrip(font, tmp_path)
+    x0, x1 = ink_extent(font, "i")
+    assert abs((x1 - x0) - 333) <= 1
+    assert abs(x0 - 133) <= 1 and abs(x1 - 467) <= 1
+    assert result.donated == 1
+    assert any("q" in n for n in result.notes)  # q is in neither font
+
+
+def test_donor_glyph_is_slanted_for_oblique_targets(tmp_path):
+    donor = build_font(False, glyphs={".notdef": (500, 50, 450), "i": (600, 100, 500)}, x_height=600)
+    donor_path = os.path.join(tmp_path, "Donor.ttf")
+    donor.save(donor_path)
+    font = build_font(False, italic_angle=-10.0)
+    convert_font(font, Options(donor=donor_path, donor_glyphs="i"))
+    font = roundtrip(font, tmp_path)
+    coords = font["glyf"]["i"].coordinates
+    top_xs = [x for x, y in coords if y == max(y for _, y in coords)]
+    bottom_xs = [x for x, y in coords if y == 0]
+    assert min(top_xs) > min(bottom_xs)  # top of the bar leans to the right
+
+
+@pytest.mark.parametrize("donor_cff,target_cff", [(True, False), (False, True)], ids=["cff-donor-into-glyf", "glyf-donor-into-cff"])
+def test_donor_across_outline_formats(tmp_path, donor_cff, target_cff):
+    donor = build_font(donor_cff, glyphs={".notdef": (500, 50, 450), "i": (600, 100, 500)}, x_height=600)
+    donor_path = os.path.join(tmp_path, "Donor.otf" if donor_cff else "Donor.ttf")
+    donor.save(donor_path)
+    font = build_font(target_cff)
+    result = convert_font(font, Options(donor=donor_path, donor_glyphs="i"))
+    out = os.path.join(tmp_path, "out.otf" if target_cff else "out.ttf")
+    font.save(out)  # must not raise (cubic flags / direction)
+    font = TTFont(out)
+    x0, x1 = ink_extent(font, "i")
+    assert abs((x1 - x0) - 333) <= 1
+    assert result.donated == 1
