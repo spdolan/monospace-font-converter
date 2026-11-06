@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "monospace-font-converter"
-version = "0.1.0"
+version = "0.0.0"
 description = "Turn a proportional font you are licensed to modify into a fixed-pitch derivative for terminal use"
 readme = "README.md"
 license = "MIT"
